@@ -12,12 +12,12 @@ from core.predictors import get_predictions, get_entropy, debug_available_models
 from core.optimizer_pso_entropy import pso_optimize_entropy_aprp
 from core.tables_userfriendly import table_rekomendasi, table_ringkas
 
-
 def rupiah_int(x) -> str:
     try:
         return f"Rp {int(round(float(x))):,}".replace(",", ".")
     except Exception:
         return "-"
+
 
 def auto_scale_price(pred_svm, pred_reg, hist_ranges):
     candidates = []
@@ -31,13 +31,15 @@ def auto_scale_price(pred_svm, pred_reg, hist_ranges):
         return 1
     return 1000 if float(np.median(candidates)) < 1000 else 1
 
+
 def mode_from_trust(k: float) -> tuple[str, str]:
-    if k < (1/3):
+    if k < (1 / 3):
         return "RENDAH", "Lebih mengandalkan data harga lama."
-    elif k <= (2/3):
+    elif k <= (2 / 3):
         return "SEDANG", "Mengandalkan perkiraan dari tren (regresi)."
     else:
         return "TINGGI", "Mengandalkan perkiraan dari model prediksi (SVM)."
+
 
 def kondisi_pasar_text(ent: float | None) -> str:
     if ent is None:
@@ -48,12 +50,14 @@ def kondisi_pasar_text(ent: float | None) -> str:
         return "Agak berubah-ubah"
     return "Sering naik-turun"
 
+
 def clamp_minmax(lo, hi):
     lo = float(lo)
     hi = float(hi)
     if hi < lo:
         lo, hi = hi, lo
     return lo, hi
+
 
 def ensure_state():
     if "step" not in st.session_state:
@@ -73,9 +77,59 @@ def ensure_state():
     if "hhat_src" not in st.session_state:
         st.session_state.hhat_src = []
     if "inputs_opt" not in st.session_state:
-        st.session_state.inputs_opt = {}  
+        st.session_state.inputs_opt = {}
     if "result" not in st.session_state:
-        st.session_state.result = None  
+        st.session_state.result = None
+
+
+def normalize_inputs_opt(saved_inputs: dict, n_var: int) -> dict:
+    """
+    FIX IndexError:
+    - memastikan q_vals & bounds panjangnya selalu == n_var
+    - kalau lebih panjang dipotong, kalau kurang dipanjangin pakai default
+    """
+    if not isinstance(saved_inputs, dict):
+        saved_inputs = {}
+
+    # q_vals
+    q_old = saved_inputs.get("q_vals", [])
+    q_new = list(q_old)[:n_var] + [1] * max(0, n_var - len(q_old))
+
+    # bounds
+    b_old = saved_inputs.get("bounds", [])
+    b_new = []
+    for i in range(n_var):
+        if i < len(b_old) and isinstance(b_old[i], dict):
+            lo = float(b_old[i].get("lo", 0.0))
+            hi = float(b_old[i].get("hi", max(lo, 0.0)))
+            e = float(b_old[i].get("e", 0.25))
+        else:
+            lo, hi, e = 0.0, 0.0, 0.25
+        b_new.append({"lo": lo, "hi": hi, "e": e})
+
+    return {
+        "q_vals": q_new,
+        "TC": int(saved_inputs.get("TC", 0)),
+        "Profit": int(saved_inputs.get("Profit", 0)),
+        "r": float(saved_inputs.get("r", 0.03)),
+        "bounds": b_new,
+    }
+
+
+def hard_reset_all():
+    """
+    Reset beneran semua state penting, biar tidak nyangkut.
+    """
+    st.session_state.step = 1
+    st.session_state.selected = []
+    st.session_state.hist_ranges = []
+    st.session_state.pred_svm_list = []
+    st.session_state.pred_reg_list = []
+    st.session_state.entropy_list = []
+    st.session_state.hhat = []
+    st.session_state.hhat_src = []
+    st.session_state.inputs_opt = {}
+    st.session_state.result = None
 
 st.set_page_config(page_title="Harga Cerdas Pangan", page_icon="🌶️", layout="wide")
 ensure_state()
@@ -107,19 +161,7 @@ with st.sidebar:
 
     st.divider()
     if st.button("🔁 Reset & mulai dari awal"):
-        for k in list(st.session_state.keys()):
-            if k not in ("step",):
-                pass
-        st.session_state.step = 1
-        st.session_state.selected = []
-        st.session_state.hist_ranges = []
-        st.session_state.pred_svm_list = []
-        st.session_state.pred_reg_list = []
-        st.session_state.entropy_list = []
-        st.session_state.hhat = []
-        st.session_state.hhat_src = []
-        st.session_state.inputs_opt = {}
-        st.session_state.result = None
+        hard_reset_all()
         st.rerun()
 
 
@@ -149,12 +191,17 @@ if st.session_state.step == 1:
                 if len(selected) < 1:
                     st.warning("Pilih minimal 1 produk dulu ya.")
                 else:
+                    
+                    if selected != st.session_state.selected:
+                        st.session_state.inputs_opt = {}
+                        st.session_state.result = None
+
                     st.session_state.selected = selected
                     st.session_state.step = 2
                     st.rerun()
-    
 
     st.stop()
+
 if st.session_state.step == 2:
     selected = st.session_state.selected
     n_var = len(selected)
@@ -220,15 +267,17 @@ if st.session_state.step == 2:
                 else:
                     st.caption(f"Catatan: {ent_status}")
 
-            rows_summary.append({
-                "Produk": var_names[i],
-                "Komoditas": kom,
-                "Kualitas": kul,
-                "Perkiraan (SVM)": "-" if show_svm is None else rupiah_int(show_svm),
-                "Perkiraan (Regresi)": "-" if show_reg is None else rupiah_int(show_reg),
-                "Kondisi Pasar (skor)": "-" if ent_val is None else f"{ent_val:.3f}",
-                "Rentang data lama": f"{rupiah_int(mn)} – {rupiah_int(mx)}",
-            })
+            rows_summary.append(
+                {
+                    "Produk": var_names[i],
+                    "Komoditas": kom,
+                    "Kualitas": kul,
+                    "Perkiraan (SVM)": "-" if show_svm is None else rupiah_int(show_svm),
+                    "Perkiraan (Regresi)": "-" if show_reg is None else rupiah_int(show_reg),
+                    "Kondisi Pasar (skor)": "-" if ent_val is None else f"{ent_val:.3f}",
+                    "Rentang data lama": f"{rupiah_int(mn)} – {rupiah_int(mx)}",
+                }
+            )
 
         st.markdown("#### Ringkasan")
         st.dataframe(pd.DataFrame(rows_summary), use_container_width=True)
@@ -260,6 +309,9 @@ if st.session_state.step == 3:
     var_names = [f"Produk {i+1}" for i in range(n_var)]
 
     st.header("Atur target & batas harga")
+
+    saved_inputs = normalize_inputs_opt(st.session_state.inputs_opt or {}, n_var)
+    st.session_state.inputs_opt = saved_inputs
 
     hhat, hhat_src = [], []
     for i in range(n_var):
@@ -293,12 +345,17 @@ if st.session_state.step == 3:
 
     with st.container(border=True):
         st.write("📌 **Harga pegangan** (patokan yang dipakai sebelum bikin rekomendasi)")
-        df_patokan = pd.DataFrame({
-            "Produk": var_names,
-            "Patokan diambil dari": hhat_src,
-            "Harga pegangan": [rupiah_int(v) for v in hhat],
-            "Kondisi pasar": [kondisi_pasar_text(None if entropy_list[i] == 0 else entropy_list[i]) for i in range(n_var)],
-        })
+        df_patokan = pd.DataFrame(
+            {
+                "Produk": var_names,
+                "Patokan diambil dari": hhat_src,
+                "Harga pegangan": [rupiah_int(v) for v in hhat],
+                "Kondisi pasar": [
+                    kondisi_pasar_text(None if entropy_list[i] == 0 else entropy_list[i])
+                    for i in range(n_var)
+                ],
+            }
+        )
         st.table(df_patokan)
 
     st.divider()
@@ -306,11 +363,9 @@ if st.session_state.step == 3:
     with st.container(border=True):
         st.write("💰 **Perkiraan jual & target**")
 
-        saved_inputs = st.session_state.inputs_opt or {}
-
         q_vals = []
         for i in range(n_var):
-            default_q = int(saved_inputs.get("q_vals", [1]*n_var)[i]) if "q_vals" in saved_inputs else 1
+            default_q = int(saved_inputs["q_vals"][i])  
             q_vals.append(
                 st.number_input(
                     f"Perkiraan jumlah jual ({var_names[i]})",
@@ -355,16 +410,18 @@ if st.session_state.step == 3:
         st.write("🧾 **Batas harga (boleh diubah)**")
 
         h_bounds, H_bounds, e_pred = [], [], []
+
         saved_bounds = saved_inputs.get("bounds", None)
 
         for i in range(n_var):
             base = float(hhat[i])
             default_lo = max(0.0, base * 0.85)
             default_hi = max(default_lo, base * 1.15)
+
             if saved_bounds and i < len(saved_bounds):
-                default_lo = saved_bounds[i].get("lo", default_lo)
-                default_hi = saved_bounds[i].get("hi", default_hi)
-                default_e = saved_bounds[i].get("e", 0.25)
+                default_lo = float(saved_bounds[i].get("lo", default_lo))
+                default_hi = float(saved_bounds[i].get("hi", default_hi))
+                default_e = float(saved_bounds[i].get("e", 0.25))
             else:
                 default_e = 0.25
 
@@ -404,7 +461,6 @@ if st.session_state.step == 3:
             H_bounds.append(float(hi))
             e_pred.append(float(e))
 
-    
         rev_max = float(np.sum(np.asarray(q_vals, dtype=float) * np.asarray(H_bounds, dtype=float)))
         rev_max_safe = rev_max * (1.0 - float(r))
         st.info(
@@ -412,7 +468,6 @@ if st.session_state.step == 3:
             f"(lebih aman sekitar **{rupiah_int(rev_max_safe)}**). Target kamu: **{rupiah_int(biaya_total)}**."
         )
 
-    
     st.session_state.inputs_opt = {
         "q_vals": [int(v) for v in q_vals],
         "TC": int(TC),
@@ -430,11 +485,10 @@ if st.session_state.step == 3:
             st.rerun()
     with cB:
         run = st.button("🚀 Buat rekomendasi harga", type="primary")
-    
+
     if not run:
         st.stop()
 
-    
     errs = []
     for i in range(n_var):
         if H_bounds[i] < h_bounds[i]:
@@ -524,18 +578,18 @@ if st.session_state.step == 4:
     st.table(table_rekomendasi(labels, best_x, as_rupiah=True))
 
     st.subheader("Ringkasan")
-    
     try:
         st.table(table_ringkas(revenue, ent_score, penalty, biaya_total))
     except TypeError:
-        
         st.table(table_ringkas(revenue, ent_score, revenue, ent_score, biaya_total))
 
     with st.expander("Detail (opsional)"):
-        df_detail = pd.DataFrame({
-            "Produk": labels,
-            "Harga rekomendasi": [rupiah_int(v) for v in best_x],
-        })
+        df_detail = pd.DataFrame(
+            {
+                "Produk": labels,
+                "Harga rekomendasi": [rupiah_int(v) for v in best_x],
+            }
+        )
         st.dataframe(df_detail, use_container_width=True)
 
     c1, c2 = st.columns([1, 2])
@@ -545,8 +599,7 @@ if st.session_state.step == 4:
             st.rerun()
     with c2:
         if st.button("🔁 Coba lagi dari awal"):
-            st.session_state.step = 1
-            st.session_state.result = None
+            hard_reset_all()
             st.rerun()
 
     st.stop()
